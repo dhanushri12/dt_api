@@ -11,6 +11,7 @@ from fastapi import (
     UploadFile, File, Form, Request
 )
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware  # ADD THIS
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from pydantic import BaseModel, EmailStr
@@ -23,6 +24,16 @@ from config import SMTP_EMAIL, SMTP_PASSWORD, UPLOAD_DIR
 
 # Initialize FastAPI FIRST
 app = FastAPI(title="Downtime API", version="1.0")
+
+# ===== CORS MIDDLEWARE =====
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # For development - allow all
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# ===== END CORS =====
 
 # Mount static files AFTER app initialization
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
@@ -226,6 +237,7 @@ def get_captcha():
         "captcha_id": captcha_id,
         "captcha_text": captcha_text
     }
+
 @app.post("/login")
 async def login(
     data: LoginModel,
@@ -281,17 +293,17 @@ async def login(
     elif "Edge" in user_agent:
         browser = "Edge"
     
-    os = "Unknown"
+    os_name = "Unknown"
     if "Windows" in user_agent:
-        os = "Windows"
+        os_name = "Windows"
     elif "Mac" in user_agent:
-        os = "macOS"
+        os_name = "macOS"
     elif "Linux" in user_agent:
-        os = "Linux"
+        os_name = "Linux"
     elif "Android" in user_agent:
-        os = "Android"
+        os_name = "Android"
     elif "iPhone" in user_agent or "iPad" in user_agent:
-        os = "iOS"
+        os_name = "iOS"
     
     new_session = IPSession(
         session_id=str(uuid.uuid4()),
@@ -303,7 +315,7 @@ async def login(
         region="Unknown",
         city="Unknown",
         browser=browser,
-        os=os,
+        os=os_name,
         user_agent=user_agent
     )
     db.add(new_session)
@@ -322,19 +334,6 @@ async def login(
             "usertype_id": user.usertype_id
         }
     }
-
-# After successful login, add this:
-new_session = IPSession(
-    session_id=str(uuid.uuid4()),
-    username=user.username,
-    email=user.emailid,
-    ip=request.client.host if request.client else "Unknown",
-    browser="Chrome",  # Parse from user-agent
-    os="Windows",      # Parse from user-agent
-    user_agent=request.headers.get("user-agent", "Unknown")
-)
-db.add(new_session)
-db.commit()
 
 @app.post("/get_otp")
 def get_otp(
@@ -511,6 +510,7 @@ async def get_liveip(request: Request):
     """Get client IP address"""
     ip = request.client.host if request.client else "Unknown"
     return {"success": True, "ip": ip}
+
 @app.get("/ip_history")
 def ip_history(
     username: str,
@@ -531,7 +531,6 @@ def ip_history(
             "country": row.country,
             "browser": row.browser,
             "os": row.os,
-            # "login_datetime": row.login_datetime  # REMOVED this line
         })
     
     return {"success": True, "count": len(data), "data": data}
