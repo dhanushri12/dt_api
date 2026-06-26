@@ -59,7 +59,7 @@ async def save_photo(photo: UploadFile, upload_dir: str = "uploads") -> str:
     with open(file_path, "wb") as f:
         f.write(content)
     
-    return f"/{upload_dir}/{filename}"
+    return filename
 
 def delete_photo(file_path: str):
     """Delete photo file if exists"""

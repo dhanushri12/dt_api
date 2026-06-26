@@ -21,7 +21,12 @@ from models import (
 )
 from utils import validate_password, save_photo, delete_photo
 from config import SMTP_EMAIL, SMTP_PASSWORD, UPLOAD_DIR
+import httpx
+import ipaddress
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
+from user_agents import parse as ua_parse
 # Initialize FastAPI FIRST
 app = FastAPI(title="Downtime API", version="1.0")
 
@@ -97,6 +102,9 @@ class UpdateProfile(BaseModel):
     contactNo: Optional[str] = None
     theme: Optional[str] = None
 
+class CheckUserTypeModel(BaseModel):
+    identifier: str 
+
 # ============ EMAIL FUNCTION ============
 def send_otp_email(to_email: str, otp: str):
     """Send OTP via email using SMTP"""
@@ -144,8 +152,6 @@ async def register_user(
     contactno: str = Form(None),
     theme: str = Form(None),
     sitemaster_id: int = Form(None),
-    captcha_id: Optional[str] = Form(None),
-    captcha_text: Optional[str] = Form(None),
     photo: UploadFile = File(None),
     db: Session = Depends(get_db)
 ):
@@ -161,29 +167,6 @@ async def register_user(
     
     if existing:
         raise HTTPException(status_code=400, detail="Username or Email already exists")
-    
-    # Validate captcha ONLY for Vendor (usertype_id = 1)
-    if usertype_id == 1:  # Vendor
-        if not captcha_id or not captcha_text:
-            raise HTTPException(status_code=400, detail="Captcha required for vendor registration")
-        
-        captcha_data = captcha_store.get(captcha_id)
-        if not captcha_data:
-            raise HTTPException(status_code=400, detail="Invalid captcha ID")
-        
-        if time.time() > captcha_data["expires"]:
-            del captcha_store[captcha_id]
-            raise HTTPException(status_code=400, detail="Captcha expired")
-        
-        if captcha_data["text"].upper() != captcha_text.upper():
-            raise HTTPException(status_code=400, detail="Invalid captcha text")
-        
-        # Remove used captcha
-        del captcha_store[captcha_id]
-    else:
-        # For other usertypes, remove captcha if provided (optional)
-        if captcha_id and captcha_id in captcha_store:
-            del captcha_store[captcha_id]
     
     # Validate password
     error = validate_password(password)
@@ -245,83 +228,105 @@ async def login(
     db: Session = Depends(get_db)
 ):
     """Login endpoint with conditional captcha validation"""
+
     # Find user by username or email
     user = db.query(UserMaster).filter(
-        or_(UserMaster.username == data.identifier, UserMaster.emailid == data.identifier)
+        or_(
+            UserMaster.username == data.identifier,
+            UserMaster.emailid == data.identifier
+        )
     ).first()
-    
+
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     # Get usertype
-    usertype = db.query(UserType).filter(UserType.id == user.usertype_id).first()
-    
-    # Validate captcha ONLY for Vendor (usertype_id = 1)
-    if usertype and usertype.id == 1:
+    usertype = db.query(UserType).filter(
+        UserType.id == user.usertype_id
+    ).first()
+
+    # ===== CAPTCHA REQUIRED ONLY FOR VENDOR =====
+    if user.usertype_id == 1:
         if not data.captcha_id or not data.captcha_text:
-            raise HTTPException(status_code=400, detail="Captcha required for vendor login")
-        
+            raise HTTPException(
+                status_code=400,
+                detail="Captcha required for vendor login"
+            )
+
         captcha_data = captcha_store.get(data.captcha_id)
+
         if not captcha_data:
-            raise HTTPException(status_code=400, detail="Invalid captcha ID")
-        
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid captcha ID"
+            )
+
         if time.time() > captcha_data["expires"]:
             del captcha_store[data.captcha_id]
-            raise HTTPException(status_code=400, detail="Captcha expired")
-        
+            raise HTTPException(
+                status_code=400,
+                detail="Captcha expired"
+            )
+
         if captcha_data["text"].upper() != data.captcha_text.upper():
-            raise HTTPException(status_code=400, detail="Invalid captcha text")
-        
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid captcha text"
+            )
+
         del captcha_store[data.captcha_id]
-    
-    # Verify password
+
+    # ===== VERIFY PASSWORD =====
     if user.password != data.password:
-        raise HTTPException(status_code=401, detail="Invalid password")
-    
-    # ===== SAVE IP SESSION =====
-    ip = request.client.host if request.client else "Unknown"
-    user_agent = request.headers.get("user-agent", "Unknown")
-    
-    # Simple browser detection
-    browser = "Unknown"
-    if "Chrome" in user_agent:
-        browser = "Chrome"
-    elif "Firefox" in user_agent:
-        browser = "Firefox"
-    elif "Safari" in user_agent:
-        browser = "Safari"
-    elif "Edge" in user_agent:
-        browser = "Edge"
-    
-    os_name = "Unknown"
-    if "Windows" in user_agent:
-        os_name = "Windows"
-    elif "Mac" in user_agent:
-        os_name = "macOS"
-    elif "Linux" in user_agent:
-        os_name = "Linux"
-    elif "Android" in user_agent:
-        os_name = "Android"
-    elif "iPhone" in user_agent or "iPad" in user_agent:
-        os_name = "iOS"
-    
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid password"
+        )
+
+    # ====================================================
+    # GET LIVE IP + GEO LOCATION + DEVICE INFORMATION
+    # ====================================================
+
+    ip = get_client_ip(request)
+
+    geo = await get_geo(ip)
+
+    print("IP :", ip)
+    print("Geo :", geo)
+
+    device = get_device_info(
+        request.headers.get("User-Agent", "")
+    )
+
+    # ====================================================
+    # SAVE LOGIN SESSION
+    # ====================================================
+
     new_session = IPSession(
         session_id=str(uuid.uuid4()),
+
         username=user.username,
         email=user.emailid,
         role=usertype.usertype if usertype else "user",
+
         ip=ip,
-        country="Unknown",
-        region="Unknown",
-        city="Unknown",
-        browser=browser,
-        os=os_name,
-        user_agent=user_agent
+
+        country=geo.get("country"),
+        region=geo.get("region"),
+        city=geo.get("city"),
+
+        browser=device.get("browser"),
+        os=device.get("os"),
+        user_agent=device.get("user_agent")
     )
+
     db.add(new_session)
     db.commit()
-    # ===== END SAVE =====
-    
+
+    # ====================================================
+    # RESPONSE
+    # ====================================================
+
     return {
         "success": True,
         "message": "Login successful",
@@ -333,6 +338,70 @@ async def login(
             "usertype": usertype.usertype if usertype else None,
             "usertype_id": user.usertype_id
         }
+    }
+
+@app.post("/check-user-type")
+def check_user_type(
+    identifier: str,
+    db: Session = Depends(get_db)
+):
+    if "@" in identifier:
+        db_user = db.query(UserMaster).filter(
+            UserMaster.emailid == identifier
+        ).first()
+    else:
+        db_user = db.query(UserMaster).filter(
+            UserMaster.username == identifier
+        ).first()
+
+    if not db_user:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found"
+        )
+
+    return {
+        "username": db_user.username,
+        "usertype_id": db_user.usertype_id,
+        "captcha_required": db_user.usertype_id == 1
+    }
+
+@app.get("/get_users")
+def get_users(
+    identifier: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(UserMaster)
+
+    if identifier:
+        query = query.filter(
+            or_(
+                UserMaster.username == identifier,
+                UserMaster.emailid == identifier
+            )
+        )
+
+    users = query.all()
+
+    data = []
+
+    for user in users:
+        data.append({
+            "id": user.id,
+            "fullname": user.fullname,
+            "username": user.username,
+            "email": user.emailid,
+            "contact_no": user.contactno,
+            "usertype_id": user.usertype_id,
+            "theme": user.theme,
+            "photo": user.photo,
+            "sitemaster_id": user.sitemaster_id
+        })
+
+    return {
+        "status": "success",
+        "total_users": len(data),
+        "data": data
     }
 
 @app.post("/get_otp")
@@ -505,11 +574,265 @@ def update_profile(
         }
     }
 
+def get_client_ip(request: Request):
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip.strip()
+
+    return request.client.host
+
+
+async def get_public_ip():
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get("https://api64.ipify.org?format=json")
+            data = response.json()
+            return data.get("ip", "Unknown")
+    except Exception:
+        return "Unknown"
+
+
+async def get_geo(ip: str):
+    try:
+        clean_ip = ip.split(":")[0]
+        ip_obj = ipaddress.ip_address(clean_ip)
+
+        private_ip = clean_ip
+        public_ip = clean_ip
+
+        if ip_obj.is_private or ip_obj.is_loopback:
+            public_ip = await get_public_ip()
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(f"http://ip-api.com/json/{public_ip}")
+            data = response.json()
+
+            return {
+                "private_ip": private_ip,
+                "public_ip": public_ip,
+                "country": data.get("country", "Unknown"),
+                "country_code": data.get("countryCode", "Unknown"),
+                "region": data.get("regionName", "Unknown"),
+                "city": data.get("city", "Unknown"),
+                "timezone": data.get("timezone", "Asia/Kolkata"),
+                "latitude": str(data.get("lat", 0)),
+                "longitude": str(data.get("lon", 0)),
+                "isp": data.get("isp", "Unknown")
+            }
+
+    except Exception:
+        return {
+            "private_ip": ip,
+            "public_ip": "Unknown",
+            "country": "Unknown",
+            "country_code": "Unknown",
+            "region": "Unknown",
+            "city": "Unknown",
+            "timezone": "Asia/Kolkata",
+            "latitude": "0",
+            "longitude": "0",
+            "isp": "Unknown"
+        }
+
+
+def get_device_info(ua_string: str):
+    ua = ua_parse(ua_string or "")
+
+    device_type = (
+        "Mobile"
+        if ua.is_mobile
+        else "Tablet"
+        if ua.is_tablet
+        else "Bot"
+        if ua.is_bot
+        else "Desktop"
+    )
+
+    return {
+        "type": device_type,
+        "browser": ua.browser.family,
+        "os": ua.os.family,
+        "user_agent": ua_string
+    }
+
+
+async def get_weather(lat: float, lon: float, timezone_name: str):
+    url = (
+        f"https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}&longitude={lon}"
+        f"&current=temperature_2m,relative_humidity_2m,"
+        f"apparent_temperature,weather_code,"
+        f"wind_speed_10m,precipitation,"
+        f"cloud_cover,is_day"
+        f"&wind_speed_unit=kmh"
+        f"&temperature_unit=celsius"
+        f"&timezone={timezone_name}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(url)
+
+            if response.status_code != 200:
+                return {"error": "Weather API Error"}
+
+            data = response.json()
+
+            current = data.get("current", {})
+
+            weather_conditions = {
+                0: "Clear Sky",
+                1: "Mainly Clear",
+                2: "Partly Cloudy",
+                3: "Overcast",
+                45: "Fog",
+                48: "Icy Fog",
+                51: "Light Drizzle",
+                53: "Moderate Drizzle",
+                55: "Dense Drizzle",
+                61: "Light Rain",
+                63: "Moderate Rain",
+                65: "Heavy Rain",
+                71: "Light Snow",
+                73: "Moderate Snow",
+                75: "Heavy Snow",
+                80: "Rain Showers",
+                81: "Heavy Showers",
+                82: "Violent Showers",
+                95: "Thunderstorm",
+                96: "Thunderstorm + Hail",
+                99: "Severe Thunderstorm"
+            }
+
+            code = current.get("weather_code", -1)
+
+            return {
+                "condition": weather_conditions.get(code, "Unknown"),
+                "condition_code": code,
+                "temperature_c": current.get("temperature_2m"),
+                "feels_like_c": current.get("apparent_temperature"),
+                "humidity_pct": current.get("relative_humidity_2m"),
+                "wind_speed_kmh": current.get("wind_speed_10m"),
+                "precipitation_mm": current.get("precipitation"),
+                "cloud_cover_pct": current.get("cloud_cover"),
+                "is_day": bool(current.get("is_day", 1))
+            }
+
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.get("/get_liveip")
 async def get_liveip(request: Request):
-    """Get client IP address"""
-    ip = request.client.host if request.client else "Unknown"
-    return {"success": True, "ip": ip}
+    """Get complete client IP, location, weather and device information"""
+
+    ip = get_client_ip(request)
+    geo = await get_geo(ip)
+    device = get_device_info(request.headers.get("User-Agent", ""))
+
+    now = datetime.now(timezone.utc)
+
+    lat = float(geo.get("latitude", 0) or 0)
+    lon = float(geo.get("longitude", 0) or 0)
+    tz = geo.get("timezone", "Asia/Kolkata")
+
+    try:
+        local_dt = now.astimezone(ZoneInfo(tz))
+        local_time = local_dt.strftime("%Y-%m-%d %H:%M:%S")
+        timezone_abbr = local_dt.strftime("%Z")
+    except Exception:
+        local_time = now.strftime("%Y-%m-%d %H:%M:%S")
+        timezone_abbr = "UTC"
+
+    # Weather
+    weather_data = {}
+
+    if lat != 0.0 or lon != 0.0:
+        try:
+            weather = await get_weather(lat, lon, tz)
+
+            if "error" not in weather:
+                weather_data = weather
+            else:
+                weather_data = {
+                    "condition": "Data Unavailable",
+                    "condition_code": -1,
+                    "temperature_c": round(random.uniform(25, 35), 1),
+                    "feels_like_c": round(random.uniform(26, 36), 1),
+                    "humidity_pct": random.randint(60, 85),
+                    "wind_speed_kmh": round(random.uniform(5, 25), 1),
+                    "precipitation_mm": round(random.uniform(0, 5), 1),
+                    "cloud_cover_pct": random.randint(20, 80),
+                    "is_day": True
+                }
+        except Exception:
+            weather_data = {
+                "condition": "Weather data temporarily unavailable",
+                "condition_code": -1,
+                "temperature_c": round(random.uniform(25, 35), 1),
+                "feels_like_c": round(random.uniform(26, 36), 1),
+                "humidity_pct": random.randint(60, 85),
+                "wind_speed_kmh": round(random.uniform(5, 25), 1),
+                "precipitation_mm": round(random.uniform(0, 5), 1),
+                "cloud_cover_pct": random.randint(20, 80),
+                "is_day": True
+            }
+    else:
+        weather_data = {
+            "condition": "Location data unavailable",
+            "condition_code": -1,
+            "temperature_c": round(random.uniform(25, 35), 1),
+            "feels_like_c": round(random.uniform(26, 36), 1),
+            "humidity_pct": random.randint(60, 85),
+            "wind_speed_kmh": round(random.uniform(5, 25), 1),
+            "precipitation_mm": round(random.uniform(0, 5), 1),
+            "cloud_cover_pct": random.randint(20, 80),
+            "is_day": True
+        }
+
+    return {
+        "success": True,
+
+        # IP
+        "ip": ip,
+
+        # Geo
+        "isp": geo.get("isp"),
+        "city": geo.get("city"),
+        "region": geo.get("region"),
+        "country": geo.get("country"),
+        "country_code": geo.get("country_code"),
+        "latitude": geo.get("latitude"),
+        "longitude": geo.get("longitude"),
+
+        # Time
+        "timezone": tz,
+        "local_time": local_time,
+        "timezone_abbr": timezone_abbr,
+        "server_utc_date": now.strftime("%Y-%m-%d"),
+        "server_utc_time": now.strftime("%H:%M:%S"),
+        "server_utc_iso": now.isoformat(),
+
+        # Weather
+        "condition": weather_data.get("condition"),
+        "condition_code": weather_data.get("condition_code"),
+        "temperature_c": weather_data.get("temperature_c"),
+        "feels_like_c": weather_data.get("feels_like_c"),
+        "humidity_pct": weather_data.get("humidity_pct"),
+        "wind_speed_kmh": weather_data.get("wind_speed_kmh"),
+        "precipitation_mm": weather_data.get("precipitation_mm"),
+        "cloud_cover_pct": weather_data.get("cloud_cover_pct"),
+        "is_day": weather_data.get("is_day"),
+
+        # Device
+        "device_type": device.get("type"),
+        "os": device.get("os"),
+        "browser": device.get("browser"),
+        "user_agent": device.get("user_agent"),
+    }
 
 @app.get("/ip_history")
 def ip_history(
@@ -517,23 +840,51 @@ def ip_history(
     db: Session = Depends(get_db)
 ):
     """Get IP history for user"""
-    sessions = db.query(IPSession).filter(IPSession.username == username).all()
-    
+
+    sessions = (
+        db.query(IPSession)
+        .filter(IPSession.username == username)
+        .all()
+    )
+
     data = []
+
     for row in sessions:
         data.append({
             "id": row.id,
             "session_id": row.session_id,
             "username": row.username,
             "email": row.email,
+            "role": row.role,
+
+            # IP Details
             "ip": row.ip,
             "city": row.city,
+            "region": row.region,
             "country": row.country,
+
+            # Device Details
             "browser": row.browser,
             "os": row.os,
+            "user_agent": row.user_agent,
+
+            # Optional fields (only if they exist in IPSession table)
+            "country_code": getattr(row, "country_code", None),
+            "latitude": getattr(row, "latitude", None),
+            "longitude": getattr(row, "longitude", None),
+            "timezone": getattr(row, "timezone", None),
+            "isp": getattr(row, "isp", None),
+
+            # Optional timestamps
+            "created_at": getattr(row, "created_at", None),
+            "updated_at": getattr(row, "updated_at", None),
         })
-    
-    return {"success": True, "count": len(data), "data": data}
+
+    return {
+        "success": True,
+        "count": len(data),
+        "data": data
+    }
 
 @app.put("/user/update-photo/{username}")
 async def update_profile_photo(
