@@ -4,9 +4,11 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    DateTime,  # ADD THIS
     ForeignKey
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from sqlalchemy.sql import func  # ADD THIS
 from config import DATABASE_URL
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -78,4 +80,52 @@ class IPSession(Base):
     browser = Column(String)
     os = Column(String)
     user_agent = Column(Text)
-    # login_datetime completely removed
+
+
+class TypeMaster(Base):
+    __tablename__ = "tbl_typemaster"
+
+    id = Column(Integer, primary_key=True, index=True)
+    type = Column(String(50), nullable=False, unique=True)
+
+class AlarmMaster(Base):
+    __tablename__ = "tbl_alarmmaster"
+
+    id = Column(Integer, primary_key=True, index=True)
+    errorcode = Column(Integer, nullable=False, unique=True)
+    description = Column(Text, nullable=False)
+    risktype = Column(Text, nullable=True)
+
+class WTGEntry(Base):
+    __tablename__ = "tbl_wtg_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    wtg_name = Column(String(100), nullable=False)
+    wtg_type = Column(String(100), nullable=False)
+    alarm_code = Column(String(50), nullable=True)
+    alarm_description = Column(String(500), nullable=True)
+    initial_observation = Column(Text, nullable=True)  # NEW
+    start_time = Column(DateTime, nullable=False)
+    end_time = Column(DateTime, nullable=True)
+    ack_by = Column(String(100), nullable=True)
+    ack_by_userid = Column(Integer, nullable=True)
+    ack_time = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, onupdate=func.now())
+
+class FeederEntry(Base):
+    __tablename__ = "tbl_feeder_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    feedername = Column(String(100), nullable=False)
+    type = Column(String(50), nullable=False)
+    errorcode = Column(Integer, nullable=True)
+    description = Column(Text, nullable=True)
+    initial_observation = Column(Text, nullable=True)  
+    starttime = Column(DateTime, nullable=False)
+    endtime = Column(DateTime, nullable=True)
+    ack_by = Column(String(100), nullable=True)
+    ack_by_userid = Column(Integer, nullable=True)
+    ack_time = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, onupdate=func.now())

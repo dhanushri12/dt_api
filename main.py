@@ -6,18 +6,20 @@ import uuid
 import smtplib
 from email.mime.text import MIMEText
 from typing import Optional
+from datetime import datetime
 from fastapi import (
     FastAPI, Depends, HTTPException, 
     UploadFile, File, Form, Request
 )
 from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware  # ADD THIS
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from pydantic import BaseModel, EmailStr
 from models import (
     Base, engine, SessionLocal, UserMaster,
-    UserType, Theme, SiteMaster, OTPStore, IPSession
+    UserType, Theme, SiteMaster, OTPStore, IPSession,
+    WTGEntry, TypeMaster, AlarmMaster, FeederEntry
 )
 from utils import validate_password, save_photo, delete_photo
 from config import SMTP_EMAIL, SMTP_PASSWORD, UPLOAD_DIR
@@ -33,18 +35,17 @@ app = FastAPI(title="Downtime API", version="1.0")
 # ===== CORS MIDDLEWARE =====
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For development - allow all
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# ===== END CORS =====
 
-# Mount static files AFTER app initialization
+# Mount static files
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+# Create tables only if they don't exist (FIXES the duplicate index error)
+Base.metadata.create_all(bind=engine, checkfirst=True)
 
 # In-memory stores
 captcha_store = {}
@@ -58,7 +59,8 @@ def get_db():
     finally:
         db.close()
 
-# ============ PYDANTIC MODELS ============
+# ==================== PYDANTIC MODELS ====================
+
 class DGRRegister(BaseModel):
     fullName: str
     userName: str
@@ -105,9 +107,44 @@ class UpdateProfile(BaseModel):
 class CheckUserTypeModel(BaseModel):
     identifier: str 
 
-# ============ EMAIL FUNCTION ============
+class WTGEntryCreate(BaseModel):
+    wtg_name: str
+    wtg_type: str
+    alarm_code: Optional[str] = None
+    alarm_description: Optional[str] = None
+    initial_observation: Optional[str] = None  # NEW
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    ack_by: Optional[str] = None
+
+class FeederEntryCreate(BaseModel):
+    feedername: str
+    type: str
+    errorcode: Optional[int] = None
+    description: Optional[str] = None
+    initial_observation: Optional[str] = None  # NEW
+    starttime: datetime
+    endtime: Optional[datetime] = None
+    ack_by: Optional[str] = None
+
+# ==================== ALARM MAP ====================
+
+ALARM_MAP = {
+    "300005": "Phase Sequence Error",
+    "300006": "Converter Overcurrent",
+    "300007": "Converter Overvoltage",
+    "300008": "Inverter Temperature High",
+    "300009": "Transformer Temperature High",
+    "300010": "Auxiliary Power Failure",
+    "300011": "Rotor Overspeed",
+    "300012": "Rotor Imbalance Detected"
+}
+
+ALARM_REVERSE_MAP = {v: k for k, v in ALARM_MAP.items()}
+
+# ==================== EMAIL FUNCTION ====================
+
 def send_otp_email(to_email: str, otp: str):
-    """Send OTP via email using SMTP"""
     try:
         msg = MIMEText(f"Your OTP is {otp}\n\nValid for 10 minutes.")
         msg["Subject"] = "Password Reset OTP"
@@ -124,7 +161,7 @@ def send_otp_email(to_email: str, otp: str):
         print(f"Email error: {e}")
         return False
 
-# ============ ENDPOINTS ============
+# ==================== ENDPOINTS ====================
 
 @app.get("/")
 def root():
@@ -155,12 +192,10 @@ async def register_user(
     photo: UploadFile = File(None),
     db: Session = Depends(get_db)
 ):
-    # Check if usertype exists
     usertype = db.query(UserType).filter(UserType.id == usertype_id).first()
     if not usertype:
         raise HTTPException(status_code=400, detail="Invalid usertype")
     
-    # Check if user exists
     existing = db.query(UserMaster).filter(
         or_(UserMaster.username == username, UserMaster.emailid == email)
     ).first()
@@ -173,7 +208,6 @@ async def register_user(
     if error:
         raise HTTPException(status_code=400, detail=error)
     
-    # Save photo if provided
     photo_path = None
     if photo and photo.filename:
         try:
@@ -181,11 +215,10 @@ async def register_user(
         except HTTPException as e:
             raise e
     
-    # Create user
     new_user = UserMaster(
         username=username,
         emailid=email,
-        password=password,  # Plain text (as per original)
+        password=password,
         fullname=fullname,
         contactno=contactno,
         usertype_id=usertype_id,
@@ -207,7 +240,6 @@ async def register_user(
 
 @app.get("/captcha")
 def get_captcha():
-    """Generate captcha"""
     captcha_text = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
     captcha_id = str(random.randint(100000, 999999))
     
@@ -409,25 +441,21 @@ def get_otp(
     data: ForgotPassword,
     db: Session = Depends(get_db)
 ):
-    """Send OTP for password reset"""
     user = db.query(UserMaster).filter(UserMaster.emailid == data.email).first()
     if not user:
         raise HTTPException(404, "Email not found")
     
     otp = str(random.randint(1000, 9999))
     
-    # Delete existing OTP
     db.query(OTPStore).filter(OTPStore.email == data.email).delete()
     
-    # Store new OTP
     db.add(OTPStore(
         email=data.email,
         otp=otp,
-        expires=str(time.time() + 600)  # 10 minutes
+        expires=str(time.time() + 600)
     ))
     db.commit()
     
-    # Send email
     if send_otp_email(data.email, otp):
         return {"success": True, "message": "OTP sent to your email"}
     else:
@@ -438,7 +466,6 @@ def verify_otp(
     data: VerifyOTP,
     db: Session = Depends(get_db)
 ):
-    """Verify OTP"""
     otp_data = db.query(OTPStore).filter(OTPStore.email == data.email).first()
     
     if not otp_data:
@@ -452,10 +479,8 @@ def verify_otp(
     if otp_data.otp != data.otp:
         raise HTTPException(status_code=400, detail="Invalid OTP")
     
-    # Mark as verified
     verified_otp_store[data.email] = True
     
-    # Delete OTP
     db.delete(otp_data)
     db.commit()
     
@@ -466,7 +491,6 @@ def reset_password(
     data: ResetPassword,
     db: Session = Depends(get_db)
 ):
-    """Reset password after OTP verification"""
     if not verified_otp_store.get(data.email):
         raise HTTPException(status_code=400, detail="Please verify OTP first")
     
@@ -481,11 +505,9 @@ def reset_password(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Update password
     user.password = data.new_password
     db.commit()
     
-    # Clear verification
     verified_otp_store.pop(data.email, None)
     
     return {"success": True, "message": "Password Reset Successfully"}
@@ -495,7 +517,6 @@ def set_password(
     data: SetPassword,
     db: Session = Depends(get_db)
 ):
-    """Set password for existing user"""
     if not data.username and not data.email:
         raise HTTPException(status_code=400, detail="Username or Email required")
     
@@ -526,7 +547,6 @@ def update_profile(
     data: UpdateProfile,
     db: Session = Depends(get_db)
 ):
-    """Update user profile"""
     if not data.username and not data.email:
         raise HTTPException(status_code=400, detail="Username or Email required")
     
@@ -540,11 +560,9 @@ def update_profile(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Update fields
     if data.fullName:
         user.fullname = data.fullName
     if data.userName:
-        # Check if username already taken
         existing = db.query(UserMaster).filter(
             UserMaster.username == data.userName,
             UserMaster.id != user.id
@@ -892,21 +910,17 @@ async def update_profile_photo(
     photo: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    """Update user profile photo"""
     user = db.query(UserMaster).filter(UserMaster.username == username).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Validate file type
     if photo.content_type not in ["image/jpeg", "image/png", "image/jpg"]:
         raise HTTPException(status_code=400, detail="Only JPG/PNG allowed")
     
     try:
-        # Delete old photo
         if user.photo:
             delete_photo(user.photo)
         
-        # Save new photo
         photo_path = await save_photo(photo, UPLOAD_DIR)
         user.photo = photo_path
         
@@ -922,3 +936,289 @@ async def update_profile_photo(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error updating photo: {str(e)}")
+
+# ==================== GET TYPES ENDPOINT ====================
+
+@app.get("/get_types")
+def get_types(db: Session = Depends(get_db)):
+    types = db.query(TypeMaster).all()
+    
+    wtg_types = []
+    grid_types = []
+    
+    for t in types:
+        if t.type.lower() == "wtg":
+            wtg_types.append({
+                "id": t.id,
+                "type": t.type
+            })
+        elif t.type.lower() == "grid":
+            grid_types.append({
+                "id": t.id,
+                "type": t.type
+            })
+    
+    return {
+        "success": True,
+        "data": {
+            "wtg_types": wtg_types,
+            "grid_types": grid_types
+        }
+    }
+
+# ==================== GET ALARMS ENDPOINT ====================
+
+@app.get("/get_alarms")
+def get_alarms(
+    errorcode: Optional[int] = None,
+    alarm_code: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(AlarmMaster)
+    
+    code = errorcode or alarm_code
+    
+    if code:
+        query = query.filter(AlarmMaster.errorcode == code)
+    
+    alarms = query.order_by(AlarmMaster.errorcode).all()
+    
+    return {
+        "success": True,
+        "count": len(alarms),
+        "data": [
+            {
+                "id": alarm.id,
+                "errorcode": alarm.errorcode,
+                "description": alarm.description,
+                "risktype": alarm.risktype
+            }
+            for alarm in alarms
+        ]
+    }
+
+# ==================== POST WTG ENTRY ENDPOINT ====================
+@app.post("/wtg_entry")
+async def create_wtg_entry(
+    entry: WTGEntryCreate,
+    db: Session = Depends(get_db)
+):
+    if entry.end_time and entry.start_time >= entry.end_time:
+        raise HTTPException(
+            status_code=400,
+            detail="End time must be after start time"
+        )
+    
+    alarm_code = entry.alarm_code
+    alarm_description = entry.alarm_description
+    
+    if alarm_code and alarm_description:
+        expected_description = ALARM_MAP.get(alarm_code)
+        if not expected_description:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid alarm code: {alarm_code}"
+            )
+        if expected_description != alarm_description:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Alarm description '{alarm_description}' does not match code '{alarm_code}'"
+            )
+    
+    elif alarm_code and not alarm_description:
+        description = ALARM_MAP.get(alarm_code)
+        if not description:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid alarm code: {alarm_code}"
+            )
+        alarm_description = description
+    
+    elif alarm_description and not alarm_code:
+        code = ALARM_REVERSE_MAP.get(alarm_description)
+        if not code:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid alarm description: {alarm_description}"
+            )
+        alarm_code = code
+    
+    ack_by_userid = None
+    ack_time = None
+    if entry.ack_by:
+        user = db.query(UserMaster).filter(UserMaster.username == entry.ack_by).first()
+        if not user:
+            raise HTTPException(
+                status_code=404,
+                detail=f"User '{entry.ack_by}' not found"
+            )
+        ack_by_userid = user.id
+        ack_time = datetime.now()
+    
+    new_entry = WTGEntry(
+        wtg_name=entry.wtg_name,
+        wtg_type=entry.wtg_type,
+        alarm_code=alarm_code,
+        alarm_description=alarm_description,
+        initial_observation=entry.initial_observation,  # NEW
+        start_time=entry.start_time,
+        end_time=entry.end_time,
+        ack_by=entry.ack_by,
+        ack_by_userid=ack_by_userid,
+        ack_time=ack_time
+    )
+    
+    db.add(new_entry)
+    db.commit()
+    db.refresh(new_entry)
+    
+    return {
+        "success": True,
+        "message": "WTG entry created successfully",
+        "data": {
+            "id": new_entry.id,
+            "wtg_name": new_entry.wtg_name,
+            "wtg_type": new_entry.wtg_type,
+            "alarm_code": new_entry.alarm_code,
+            "alarm_description": new_entry.alarm_description,
+            "initial_observation": new_entry.initial_observation,  # NEW
+            "start_time": new_entry.start_time,
+            "end_time": new_entry.end_time,
+            "ack_by": new_entry.ack_by,
+            "ack_by_userid": new_entry.ack_by_userid,
+            "ack_time": new_entry.ack_time,
+            "created_at": new_entry.created_at
+        }
+    }
+
+# ==================== POST FEEDER ENTRY ENDPOINT ====================
+@app.post("/feeder_entry")
+async def create_feeder_entry(
+    entry: FeederEntryCreate,
+    db: Session = Depends(get_db)
+):
+    type_exists = db.query(TypeMaster).filter(TypeMaster.type == entry.type).first()
+    if not type_exists:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid type '{entry.type}'. Must be WTG or Grid"
+        )
+    
+    if entry.endtime and entry.starttime >= entry.endtime:
+        raise HTTPException(
+            status_code=400,
+            detail="End time must be after start time"
+        )
+    
+    errorcode = entry.errorcode
+    description = entry.description
+    
+    if errorcode and description:
+        alarm = db.query(AlarmMaster).filter(
+            AlarmMaster.errorcode == errorcode,
+            AlarmMaster.description == description
+        ).first()
+        
+        if not alarm:
+            alarm_by_code = db.query(AlarmMaster).filter(
+                AlarmMaster.errorcode == errorcode
+            ).first()
+            
+            if alarm_by_code:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Errorcode {errorcode} has description '{alarm_by_code.description}', not '{description}'"
+                )
+            
+            alarm_by_desc = db.query(AlarmMaster).filter(
+                AlarmMaster.description == description
+            ).first()
+            
+            if alarm_by_desc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Description '{description}' has errorcode {alarm_by_desc.errorcode}, not {errorcode}"
+                )
+            
+            raise HTTPException(
+                status_code=404,
+                detail=f"No alarm found with errorcode {errorcode} and description '{description}'"
+            )
+        
+        errorcode = alarm.errorcode
+        description = alarm.description
+    
+    elif errorcode and not description:
+        alarm = db.query(AlarmMaster).filter(
+            AlarmMaster.errorcode == errorcode
+        ).first()
+        
+        if not alarm:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No alarm found with errorcode: {errorcode}"
+            )
+        
+        description = alarm.description
+    
+    elif description and not errorcode:
+        alarm = db.query(AlarmMaster).filter(
+            AlarmMaster.description.ilike(f"%{description}%")
+        ).first()
+        
+        if not alarm:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No alarm found with description containing: {description}"
+            )
+        
+        errorcode = alarm.errorcode
+        description = alarm.description
+    
+    ack_by_userid = None
+    ack_time = None
+    if entry.ack_by:
+        user = db.query(UserMaster).filter(UserMaster.username == entry.ack_by).first()
+        if not user:
+            raise HTTPException(
+                status_code=404,
+                detail=f"User '{entry.ack_by}' not found"
+            )
+        ack_by_userid = user.id
+        ack_time = datetime.now()
+    
+    new_entry = FeederEntry(
+        feedername=entry.feedername,
+        type=entry.type,
+        errorcode=errorcode,
+        description=description,
+        initial_observation=entry.initial_observation,  # NEW
+        starttime=entry.starttime,
+        endtime=entry.endtime,
+        ack_by=entry.ack_by,
+        ack_by_userid=ack_by_userid,
+        ack_time=ack_time
+    )
+    
+    db.add(new_entry)
+    db.commit()
+    db.refresh(new_entry)
+    
+    return {
+        "success": True,
+        "message": "Feeder entry created successfully",
+        "data": {
+            "id": new_entry.id,
+            "feedername": new_entry.feedername,
+            "type": new_entry.type,
+            "errorcode": new_entry.errorcode,
+            "description": new_entry.description,
+            "initial_observation": new_entry.initial_observation,  # NEW
+            "starttime": new_entry.starttime,
+            "endtime": new_entry.endtime,
+            "ack_by": new_entry.ack_by,
+            "ack_by_userid": new_entry.ack_by_userid,
+            "ack_time": new_entry.ack_time,
+            "created_at": new_entry.created_at
+        }
+    }
