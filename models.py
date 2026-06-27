@@ -104,12 +104,14 @@ class WTGEntry(Base):
     wtg_type = Column(String(100), nullable=False)
     alarm_code = Column(String(50), nullable=True)
     alarm_description = Column(String(500), nullable=True)
-    initial_observation = Column(Text, nullable=True)  # NEW
+    initial_observation = Column(Text, nullable=True)
     start_time = Column(DateTime, nullable=False)
     end_time = Column(DateTime, nullable=True)
     ack_by = Column(String(100), nullable=True)
     ack_by_userid = Column(Integer, nullable=True)
     ack_time = Column(DateTime, nullable=True)
+    categorized_by = Column(String(100), nullable=True)  
+    categorized_time = Column(DateTime, nullable=True)   
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
 
@@ -127,5 +129,21 @@ class FeederEntry(Base):
     ack_by = Column(String(100), nullable=True)
     ack_by_userid = Column(Integer, nullable=True)
     ack_time = Column(DateTime, nullable=True)
+    categorized_by = Column(String(100), nullable=True)  
+    categorized_time = Column(DateTime, nullable=True)   
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
+
+class ChooseCategory(Base):
+    __tablename__ = "tbl_choosecategory"  
+
+    id = Column(Integer, primary_key=True, index=True)
+    choosecategory = Column(String(50), nullable=True)  
+
+class ResponseDuration(Base):
+    __tablename__ = "tbl_response_master"
+
+    id = Column(Integer, primary_key=True, index=True)
+    responsecode = Column(String(50), nullable=False, unique=True)
+    responsedescription = Column(Text, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
