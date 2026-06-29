@@ -4,11 +4,11 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    DateTime,  # ADD THIS
+    DateTime,  
     ForeignKey
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
-from sqlalchemy.sql import func  # ADD THIS
+from sqlalchemy.sql import func  
 from config import DATABASE_URL
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -37,7 +37,6 @@ class UserType(Base):
     id = Column(Integer, primary_key=True)
     usertype = Column(String(255))
     
-    # Relationship
     users = relationship("UserMaster", back_populates="usertype")
 
 class Theme(Base):
@@ -141,7 +140,7 @@ class ChooseCategory(Base):
     choosecategory = Column(String(50), nullable=True)  
 
 class ResponseDuration(Base):
-    __tablename__ = "tbl_response_master"
+    __tablename__ = "tbl_responsemaster"
 
     id = Column(Integer, primary_key=True, index=True)
     responsecode = Column(String(50), nullable=False, unique=True)

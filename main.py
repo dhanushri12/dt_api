@@ -339,6 +339,7 @@ def get_response_reverse_map(db: Session):
     responses = db.query(ResponseMaster).all()
     return {r.responsedescription: r.responsecode for r in responses}
 
+
 # ============================================================
 # AUTH ROUTES
 # ============================================================
@@ -1237,7 +1238,7 @@ def get_downtimelist(
         "data": all_entries
     }
 
-# ==================== POST RESPONSE DURATION ENDPOINT ====================
+
 # ==================== POST RESPONSE DURATION ENDPOINT ====================
 
 @app.post("/post_responseduration")
@@ -1245,22 +1246,12 @@ async def create_response_duration(
     entry: ResponseDurationCreate,
     db: Session = Depends(get_db)
 ):
-    """
-    Create a response duration entry with auto-population.
-    
-    - If responsecode is provided, responsedescription is auto-populated
-    - If responsedescription is provided, responsecode is auto-populated
-    - If both are provided, they must match
-    - If neither is provided, both remain NULL
-    - Duration is auto-calculated from starttime and endtime
-    """
-    
-    # Auto-populate response code/description
+   
     responsecode = entry.responsecode
     responsedescription = entry.responsedescription
     
     if responsecode and responsedescription:
-        # Both provided - verify they match
+        
         expected_description = RESPONSE_MAP.get(responsecode)
         if not expected_description:
             raise HTTPException(
@@ -1274,7 +1265,7 @@ async def create_response_duration(
             )
     
     elif responsecode and not responsedescription:
-        # Only code provided - auto-populate description
+ 
         description = RESPONSE_MAP.get(responsecode)
         if not description:
             raise HTTPException(
@@ -1284,7 +1275,7 @@ async def create_response_duration(
         responsedescription = description
     
     elif responsedescription and not responsecode:
-        # Only description provided - auto-populate code
+        
         code = RESPONSE_REVERSE_MAP.get(responsedescription)
         if not code:
             raise HTTPException(
@@ -1293,7 +1284,7 @@ async def create_response_duration(
             )
         responsecode = code
     
-    # Auto-calculate duration if endtime is provided
+  
     duration = entry.duration
     if entry.endtime and not duration:
         diff = entry.endtime - entry.starttime
@@ -1305,14 +1296,12 @@ async def create_response_duration(
         else:
             duration = f"{minutes}m"
     
-    # Validate endtime is after starttime
     if entry.endtime and entry.starttime >= entry.endtime:
         raise HTTPException(
             status_code=400,
             detail="End time must be after start time"
         )
-    
-    # Create new response duration entry
+   
     new_entry = ResponseDuration(
         responsecode=responsecode,
         responsedescription=responsedescription,
