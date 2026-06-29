@@ -1373,3 +1373,12 @@ app.include_router(master_router)
 app.include_router(wtg_router)
 app.include_router(feeder_router)
 app.include_router(downtime_router)
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000
+    )
