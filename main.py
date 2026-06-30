@@ -4,31 +4,36 @@ import string
 import time
 import uuid
 import smtplib
+import httpx
+import ipaddress
+
 from email.mime.text import MIMEText
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
 from fastapi import (
-    FastAPI, Depends, HTTPException, 
+    FastAPI, Depends, HTTPException,
     UploadFile, File, Form, Request, APIRouter
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func, literal
+
 from pydantic import BaseModel, EmailStr
+from user_agents import parse as ua_parse
+
 from models import (
     Base, engine, SessionLocal, UserMaster,
     UserType, Theme, SiteMaster, OTPStore, IPSession,
-    WTGEntry, TypeMaster, AlarmMaster, FeederEntry, ChooseCategory,
-    ResponseDuration
+    WTGEntry, TypeMaster, AlarmMaster, FeederEntry,
+    ChooseCategory, ResponseDuration
 )
+
 from utils import validate_password, save_photo, delete_photo
 from config import SMTP_EMAIL, SMTP_PASSWORD, UPLOAD_DIR
-import httpx
-import ipaddress
-from zoneinfo import ZoneInfo
-from user_agents import parse as ua_parse
-
 
 # INITIALIZATION
 
@@ -726,9 +731,161 @@ async def update_profile_photo(
 # ============================================================
 # IP ROUTES
 # ============================================================
+def get_client_ip(request: Request):
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip.strip()
+
+    return request.client.host
+
+
+async def get_public_ip():
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get("https://api64.ipify.org?format=json")
+            data = response.json()
+            return data.get("ip", "Unknown")
+    except Exception:
+        return "Unknown"
+
+
+async def get_geo(ip: str):
+    try:
+        clean_ip = ip.split(":")[0]
+        ip_obj = ipaddress.ip_address(clean_ip)
+
+        private_ip = clean_ip
+        public_ip = clean_ip
+
+        if ip_obj.is_private or ip_obj.is_loopback:
+            public_ip = await get_public_ip()
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(f"http://ip-api.com/json/{public_ip}")
+            data = response.json()
+
+            return {
+                "private_ip": private_ip,
+                "public_ip": public_ip,
+                "country": data.get("country", "Unknown"),
+                "country_code": data.get("countryCode", "Unknown"),
+                "region": data.get("regionName", "Unknown"),
+                "city": data.get("city", "Unknown"),
+                "timezone": data.get("timezone", "Asia/Kolkata"),
+                "latitude": str(data.get("lat", 0)),
+                "longitude": str(data.get("lon", 0)),
+                "isp": data.get("isp", "Unknown")
+            }
+
+    except Exception:
+        return {
+            "private_ip": ip,
+            "public_ip": "Unknown",
+            "country": "Unknown",
+            "country_code": "Unknown",
+            "region": "Unknown",
+            "city": "Unknown",
+            "timezone": "Asia/Kolkata",
+            "latitude": "0",
+            "longitude": "0",
+            "isp": "Unknown"
+        }
+
+
+def get_device_info(ua_string: str):
+    ua = ua_parse(ua_string or "")
+
+    device_type = (
+        "Mobile"
+        if ua.is_mobile
+        else "Tablet"
+        if ua.is_tablet
+        else "Bot"
+        if ua.is_bot
+        else "Desktop"
+    )
+
+    return {
+        "type": device_type,
+        "browser": ua.browser.family,
+        "os": ua.os.family,
+        "user_agent": ua_string
+    }
+
+
+async def get_weather(lat: float, lon: float, timezone_name: str):
+    url = (
+        f"https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}&longitude={lon}"
+        f"&current=temperature_2m,relative_humidity_2m,"
+        f"apparent_temperature,weather_code,"
+        f"wind_speed_10m,precipitation,"
+        f"cloud_cover,is_day"
+        f"&wind_speed_unit=kmh"
+        f"&temperature_unit=celsius"
+        f"&timezone={timezone_name}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(url)
+
+            if response.status_code != 200:
+                return {"error": "Weather API Error"}
+
+            data = response.json()
+
+            current = data.get("current", {})
+
+            weather_conditions = {
+                0: "Clear Sky",
+                1: "Mainly Clear",
+                2: "Partly Cloudy",
+                3: "Overcast",
+                45: "Fog",
+                48: "Icy Fog",
+                51: "Light Drizzle",
+                53: "Moderate Drizzle",
+                55: "Dense Drizzle",
+                61: "Light Rain",
+                63: "Moderate Rain",
+                65: "Heavy Rain",
+                71: "Light Snow",
+                73: "Moderate Snow",
+                75: "Heavy Snow",
+                80: "Rain Showers",
+                81: "Heavy Showers",
+                82: "Violent Showers",
+                95: "Thunderstorm",
+                96: "Thunderstorm + Hail",
+                99: "Severe Thunderstorm"
+            }
+
+            code = current.get("weather_code", -1)
+
+            return {
+                "condition": weather_conditions.get(code, "Unknown"),
+                "condition_code": code,
+                "temperature_c": current.get("temperature_2m"),
+                "feels_like_c": current.get("apparent_temperature"),
+                "humidity_pct": current.get("relative_humidity_2m"),
+                "wind_speed_kmh": current.get("wind_speed_10m"),
+                "precipitation_mm": current.get("precipitation"),
+                "cloud_cover_pct": current.get("cloud_cover"),
+                "is_day": bool(current.get("is_day", 1))
+            }
+
+    except Exception as e:
+        return {"error": str(e)}
 
 @ip_router.get("/live")
 async def get_liveip(request: Request):
+    """Get complete client IP, location, weather and device information"""
+
     ip = get_client_ip(request)
     geo = await get_geo(ip)
     device = get_device_info(request.headers.get("User-Agent", ""))
@@ -747,11 +904,13 @@ async def get_liveip(request: Request):
         local_time = now.strftime("%Y-%m-%d %H:%M:%S")
         timezone_abbr = "UTC"
 
+    # Weather
     weather_data = {}
 
     if lat != 0.0 or lon != 0.0:
         try:
             weather = await get_weather(lat, lon, tz)
+
             if "error" not in weather:
                 weather_data = weather
             else:
@@ -793,7 +952,11 @@ async def get_liveip(request: Request):
 
     return {
         "success": True,
+
+        # IP
         "ip": ip,
+
+        # Geo
         "isp": geo.get("isp"),
         "city": geo.get("city"),
         "region": geo.get("region"),
@@ -801,12 +964,16 @@ async def get_liveip(request: Request):
         "country_code": geo.get("country_code"),
         "latitude": geo.get("latitude"),
         "longitude": geo.get("longitude"),
+
+        # Time
         "timezone": tz,
         "local_time": local_time,
         "timezone_abbr": timezone_abbr,
         "server_utc_date": now.strftime("%Y-%m-%d"),
         "server_utc_time": now.strftime("%H:%M:%S"),
         "server_utc_iso": now.isoformat(),
+
+        # Weather
         "condition": weather_data.get("condition"),
         "condition_code": weather_data.get("condition_code"),
         "temperature_c": weather_data.get("temperature_c"),
@@ -816,11 +983,14 @@ async def get_liveip(request: Request):
         "precipitation_mm": weather_data.get("precipitation_mm"),
         "cloud_cover_pct": weather_data.get("cloud_cover_pct"),
         "is_day": weather_data.get("is_day"),
+
+        # Device
         "device_type": device.get("type"),
         "os": device.get("os"),
         "browser": device.get("browser"),
         "user_agent": device.get("user_agent"),
     }
+
 
 @ip_router.get("/history")
 def ip_history(
