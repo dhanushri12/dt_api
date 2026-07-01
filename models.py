@@ -29,7 +29,6 @@ class UserMaster(Base):
     photo = Column(String(255))
     password = Column(String(255), nullable=False)
     
-    # Relationship
     usertype = relationship("UserType", back_populates="users")
 
 class UserType(Base):
@@ -46,6 +45,7 @@ class Theme(Base):
 
 class SiteMaster(Base):
     __tablename__ = "tbl_sitemaster"
+    
     id = Column(Integer, primary_key=True)
     siteid = Column(Integer)
     sitename = Column(String(50))
@@ -80,20 +80,30 @@ class IPSession(Base):
     os = Column(String)
     user_agent = Column(Text)
 
-
 class TypeMaster(Base):
     __tablename__ = "tbl_typemaster"
-
     id = Column(Integer, primary_key=True, index=True)
     type = Column(String(50), nullable=False, unique=True)
 
 class AlarmMaster(Base):
     __tablename__ = "tbl_alarmmaster"
-
     id = Column(Integer, primary_key=True, index=True)
     errorcode = Column(Integer, nullable=False, unique=True)
     description = Column(Text, nullable=False)
     risktype = Column(Text, nullable=True)
+
+class WTGMaster(Base):
+    __tablename__ = "tbl_wtgmaster"
+    id = Column(Integer, primary_key=True)
+    site_id = Column(Integer, ForeignKey("tbl_sitemaster.id"))
+    wtg_id = Column(Integer)
+    wtg_name = Column(String(100))
+    ip_address = Column(String(50))
+    capacity = Column(String(50))
+    feeder = Column(String(50))
+    latitude = Column(String(50))
+    longitude = Column(String(50))
+    status = Column(Integer, default=0)
 
 class WTGEntry(Base):
     __tablename__ = "tbl_wtg_entries"
@@ -110,7 +120,8 @@ class WTGEntry(Base):
     ack_by_userid = Column(Integer, nullable=True)
     ack_time = Column(DateTime, nullable=True)
     categorized_by = Column(String(100), nullable=True)  
-    categorized_time = Column(DateTime, nullable=True)   
+    categorized_time = Column(DateTime, nullable=True)
+    is_deleted = Column(Integer, default=0)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
 
@@ -129,20 +140,27 @@ class FeederEntry(Base):
     ack_by_userid = Column(Integer, nullable=True)
     ack_time = Column(DateTime, nullable=True)
     categorized_by = Column(String(100), nullable=True)  
-    categorized_time = Column(DateTime, nullable=True)   
+    categorized_time = Column(DateTime, nullable=True)
+    is_deleted = Column(Integer, default=0)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, onupdate=func.now())
 
 class ChooseCategory(Base):
-    __tablename__ = "tbl_choosecategory"  
-
+    __tablename__ = "tbl_choosecategory"
     id = Column(Integer, primary_key=True, index=True)
-    choosecategory = Column(String(50), nullable=True)  
+    choosecategory = Column(String(50), nullable=True)
 
-class ResponseDuration(Base):
-    __tablename__ = "tbl_responsemaster"
-
+class ResponseMaster(Base):
+    __tablename__ = "tbl_response_master"
     id = Column(Integer, primary_key=True, index=True)
     responsecode = Column(String(50), nullable=False, unique=True)
     responsedescription = Column(Text, nullable=False)
-    created_at = Column(DateTime, server_default=func.now())
+
+class ResponseDuration(Base):
+    __tablename__ = "tbl_response_duration"
+    id = Column(Integer, primary_key=True, index=True)
+    responsecode = Column(String(50), nullable=False)
+    responsedescription = Column(Text, nullable=True)
+    starttime = Column(DateTime, nullable=False)
+    endtime = Column(DateTime, nullable=True)
+    duration = Column(String(50), nullable=True)

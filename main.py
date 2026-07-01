@@ -29,7 +29,7 @@ from models import (
     Base, engine, SessionLocal, UserMaster,
     UserType, Theme, SiteMaster, OTPStore, IPSession,
     WTGEntry, TypeMaster, AlarmMaster, FeederEntry,
-    ChooseCategory, ResponseDuration
+    ChooseCategory, ResponseDuration, WTGMaster, ResponseMaster
 )
 
 from utils import validate_password, save_photo, delete_photo
@@ -48,16 +48,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-
 
 Base.metadata.create_all(bind=engine, checkfirst=True)
 
-
 captcha_store = {}
 verified_otp_store = {}
-
 
 def get_db():
     db = SessionLocal()
@@ -66,33 +62,17 @@ def get_db():
     finally:
         db.close()
 
-
-
 # ROUTERS
-
 auth_router = APIRouter(prefix="/auth", tags=["Authentication"])
-
-
 user_router = APIRouter(prefix="/users", tags=["Users"])
-
-
 ip_router = APIRouter(prefix="/ip", tags=["IP Management"])
-
-
 master_router = APIRouter(prefix="/master", tags=["Master Data"])
-
-
 wtg_router = APIRouter(prefix="/wtg", tags=["WTG Entries"])
-
-
 feeder_router = APIRouter(prefix="/feeder", tags=["Feeder Entries"])
-
-
 downtime_router = APIRouter(prefix="/downtime", tags=["Downtime"])
+response_router = APIRouter(prefix="/response", tags=["Response Management"])
 
-# ============================================================
 # PYDANTIC MODELS
-# ============================================================
 
 class DGRRegister(BaseModel):
     fullName: str
@@ -160,17 +140,6 @@ class FeederEntryCreate(BaseModel):
     endtime: Optional[datetime] = None
     ack_by: Optional[str] = None
 
-# ==================== RESPONSE DURATION PYDANTIC MODELS ====================
-
-class ResponseDurationCreate(BaseModel):
-    responsecode: str
-    responsedescription: Optional[str] = None
-    starttime: datetime
-    endtime: Optional[datetime] = None
-    duration: Optional[str] = None
-
-# ==================== RESPONSE DURATION PYDANTIC MODELS ====================
-
 class ResponseDurationCreate(BaseModel):
     responsecode: Optional[str] = None
     responsedescription: Optional[str] = None
@@ -178,9 +147,43 @@ class ResponseDurationCreate(BaseModel):
     endtime: Optional[datetime] = None
     duration: Optional[str] = None
 
-# ============================================================
+class DowntimeViewResponse(BaseModel):
+    id: int
+    name: str
+    alarmcode: Optional[str] = None
+    alarmdescription: Optional[str] = None
+    type: str
+    status: str
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    duration: Optional[str] = None
+    ack_by: Optional[str] = None
+    ack_time: Optional[datetime] = None
+    ack_by_userid: Optional[int] = None
+    categorized_by: Optional[str] = None
+    categorized_time: Optional[datetime] = None
+    initial_observation: Optional[str] = None
+    source: str
+
+class DowntimeEditRequest(BaseModel):
+    id: int
+    source: str
+    name: str
+    alarmcode: Optional[str] = None
+    alarmdescription: Optional[str] = None
+    type: str
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    ack_by: Optional[str] = None
+    categorized_by: Optional[str] = None
+    initial_observation: Optional[str] = None
+
+class DowntimeDeleteRequest(BaseModel):
+    id: int
+    source: str
+    name: str
+
 # HELPERS & UTILITY FUNCTIONS
-# ============================================================
 
 ALARM_MAP = {
     "300005": "Phase Sequence Error",
@@ -194,6 +197,14 @@ ALARM_MAP = {
 }
 
 ALARM_REVERSE_MAP = {v: k for k, v in ALARM_MAP.items()}
+
+def get_response_map(db: Session):
+    responses = db.query(ResponseMaster).all()
+    return {r.responsecode: r.responsedescription for r in responses}
+
+def get_response_reverse_map(db: Session):
+    responses = db.query(ResponseMaster).all()
+    return {r.responsedescription: r.responsecode for r in responses}
 
 def send_otp_email(to_email: str, otp: str):
     try:
@@ -331,23 +342,8 @@ async def get_weather(lat: float, lon: float, timezone_name: str):
             }
     except Exception as e:
         return {"error": str(e)}
-    
-# ==================== RESPONSE CODE MAPPING ====================
 
-def get_response_map(db: Session):
-    """Fetch response code mapping from database"""
-    responses = db.query(ResponseMaster).all()
-    return {r.responsecode: r.responsedescription for r in responses}
-
-def get_response_reverse_map(db: Session):
-    """Fetch reverse response code mapping from database"""
-    responses = db.query(ResponseMaster).all()
-    return {r.responsedescription: r.responsecode for r in responses}
-
-
-# ============================================================
-# AUTH ROUTES
-# ============================================================
+# ==================== AUTH ROUTES ====================
 
 @auth_router.post("/login")
 async def login(
@@ -609,9 +605,7 @@ def get_captcha():
         "captcha_text": captcha_text
     }
 
-# ============================================================
-# USER ROUTES
-# ============================================================
+# ==================== USER ROUTES ====================
 
 @user_router.get("/")
 def get_users(
@@ -728,164 +722,10 @@ async def update_profile_photo(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error updating photo: {str(e)}")
 
-# ============================================================
-# IP ROUTES
-# ============================================================
-def get_client_ip(request: Request):
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip.strip()
-
-    return request.client.host
-
-
-async def get_public_ip():
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.get("https://api64.ipify.org?format=json")
-            data = response.json()
-            return data.get("ip", "Unknown")
-    except Exception:
-        return "Unknown"
-
-
-async def get_geo(ip: str):
-    try:
-        clean_ip = ip.split(":")[0]
-        ip_obj = ipaddress.ip_address(clean_ip)
-
-        private_ip = clean_ip
-        public_ip = clean_ip
-
-        if ip_obj.is_private or ip_obj.is_loopback:
-            public_ip = await get_public_ip()
-
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(f"http://ip-api.com/json/{public_ip}")
-            data = response.json()
-
-            return {
-                "private_ip": private_ip,
-                "public_ip": public_ip,
-                "country": data.get("country", "Unknown"),
-                "country_code": data.get("countryCode", "Unknown"),
-                "region": data.get("regionName", "Unknown"),
-                "city": data.get("city", "Unknown"),
-                "timezone": data.get("timezone", "Asia/Kolkata"),
-                "latitude": str(data.get("lat", 0)),
-                "longitude": str(data.get("lon", 0)),
-                "isp": data.get("isp", "Unknown")
-            }
-
-    except Exception:
-        return {
-            "private_ip": ip,
-            "public_ip": "Unknown",
-            "country": "Unknown",
-            "country_code": "Unknown",
-            "region": "Unknown",
-            "city": "Unknown",
-            "timezone": "Asia/Kolkata",
-            "latitude": "0",
-            "longitude": "0",
-            "isp": "Unknown"
-        }
-
-
-def get_device_info(ua_string: str):
-    ua = ua_parse(ua_string or "")
-
-    device_type = (
-        "Mobile"
-        if ua.is_mobile
-        else "Tablet"
-        if ua.is_tablet
-        else "Bot"
-        if ua.is_bot
-        else "Desktop"
-    )
-
-    return {
-        "type": device_type,
-        "browser": ua.browser.family,
-        "os": ua.os.family,
-        "user_agent": ua_string
-    }
-
-
-async def get_weather(lat: float, lon: float, timezone_name: str):
-    url = (
-        f"https://api.open-meteo.com/v1/forecast"
-        f"?latitude={lat}&longitude={lon}"
-        f"&current=temperature_2m,relative_humidity_2m,"
-        f"apparent_temperature,weather_code,"
-        f"wind_speed_10m,precipitation,"
-        f"cloud_cover,is_day"
-        f"&wind_speed_unit=kmh"
-        f"&temperature_unit=celsius"
-        f"&timezone={timezone_name}"
-    )
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(url)
-
-            if response.status_code != 200:
-                return {"error": "Weather API Error"}
-
-            data = response.json()
-
-            current = data.get("current", {})
-
-            weather_conditions = {
-                0: "Clear Sky",
-                1: "Mainly Clear",
-                2: "Partly Cloudy",
-                3: "Overcast",
-                45: "Fog",
-                48: "Icy Fog",
-                51: "Light Drizzle",
-                53: "Moderate Drizzle",
-                55: "Dense Drizzle",
-                61: "Light Rain",
-                63: "Moderate Rain",
-                65: "Heavy Rain",
-                71: "Light Snow",
-                73: "Moderate Snow",
-                75: "Heavy Snow",
-                80: "Rain Showers",
-                81: "Heavy Showers",
-                82: "Violent Showers",
-                95: "Thunderstorm",
-                96: "Thunderstorm + Hail",
-                99: "Severe Thunderstorm"
-            }
-
-            code = current.get("weather_code", -1)
-
-            return {
-                "condition": weather_conditions.get(code, "Unknown"),
-                "condition_code": code,
-                "temperature_c": current.get("temperature_2m"),
-                "feels_like_c": current.get("apparent_temperature"),
-                "humidity_pct": current.get("relative_humidity_2m"),
-                "wind_speed_kmh": current.get("wind_speed_10m"),
-                "precipitation_mm": current.get("precipitation"),
-                "cloud_cover_pct": current.get("cloud_cover"),
-                "is_day": bool(current.get("is_day", 1))
-            }
-
-    except Exception as e:
-        return {"error": str(e)}
+# ==================== IP ROUTES ====================
 
 @ip_router.get("/live")
 async def get_liveip(request: Request):
-    """Get complete client IP, location, weather and device information"""
-
     ip = get_client_ip(request)
     geo = await get_geo(ip)
     device = get_device_info(request.headers.get("User-Agent", ""))
@@ -904,13 +744,11 @@ async def get_liveip(request: Request):
         local_time = now.strftime("%Y-%m-%d %H:%M:%S")
         timezone_abbr = "UTC"
 
-    # Weather
     weather_data = {}
 
     if lat != 0.0 or lon != 0.0:
         try:
             weather = await get_weather(lat, lon, tz)
-
             if "error" not in weather:
                 weather_data = weather
             else:
@@ -952,11 +790,7 @@ async def get_liveip(request: Request):
 
     return {
         "success": True,
-
-        # IP
         "ip": ip,
-
-        # Geo
         "isp": geo.get("isp"),
         "city": geo.get("city"),
         "region": geo.get("region"),
@@ -964,16 +798,12 @@ async def get_liveip(request: Request):
         "country_code": geo.get("country_code"),
         "latitude": geo.get("latitude"),
         "longitude": geo.get("longitude"),
-
-        # Time
         "timezone": tz,
         "local_time": local_time,
         "timezone_abbr": timezone_abbr,
         "server_utc_date": now.strftime("%Y-%m-%d"),
         "server_utc_time": now.strftime("%H:%M:%S"),
         "server_utc_iso": now.isoformat(),
-
-        # Weather
         "condition": weather_data.get("condition"),
         "condition_code": weather_data.get("condition_code"),
         "temperature_c": weather_data.get("temperature_c"),
@@ -983,14 +813,11 @@ async def get_liveip(request: Request):
         "precipitation_mm": weather_data.get("precipitation_mm"),
         "cloud_cover_pct": weather_data.get("cloud_cover_pct"),
         "is_day": weather_data.get("is_day"),
-
-        # Device
         "device_type": device.get("type"),
         "os": device.get("os"),
         "browser": device.get("browser"),
         "user_agent": device.get("user_agent"),
     }
-
 
 @ip_router.get("/history")
 def ip_history(
@@ -1034,9 +861,7 @@ def ip_history(
         "data": data
     }
 
-# ============================================================
-# MASTER DATA ROUTES
-# ============================================================
+# ==================== MASTER DATA ROUTES ====================
 
 @master_router.get("/sites")
 def get_sites(db: Session = Depends(get_db)):
@@ -1092,7 +917,7 @@ def get_alarms(
                 "description": alarm.description,
                 "risktype": alarm.risktype
             }
-            for alarm in alarms
+            for alarm in alarms 
         ]
     }
 
@@ -1108,9 +933,93 @@ def get_category(db: Session = Depends(get_db)):
         ]
     }
 
-# ============================================================
-# WTG ENTRY ROUTES
-# ============================================================
+@master_router.get("/turbines")
+def get_all_turbines(
+    site_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Get all turbines.
+    If site_id is provided, returns turbines for that specific site.
+    If site_id is not provided, returns all sites with their turbines.
+    """
+    
+    if site_id:
+        # Get specific site with its turbines
+        site = db.query(SiteMaster).filter(SiteMaster.id == site_id).first()
+        
+        if not site:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Site with id {site_id} not found"
+            )
+        
+        turbines = db.query(WTGMaster).filter(WTGMaster.site_id == site_id).all()
+        
+        turbine_list = []
+        for wtg in turbines:
+            turbine_list.append({
+                "id": wtg.id,
+                "wtg_id": wtg.wtg_id,
+                "wtg_name": wtg.wtg_name,
+                "ip_address": wtg.ip_address,
+                "capacity": wtg.capacity,
+                "feeder": wtg.feeder,
+                "latitude": wtg.latitude,
+                "longitude": wtg.longitude,
+                "status": wtg.status
+            })
+        
+        return {
+            "success": True,
+            "data": {
+                "site": {
+                    "id": site.id,
+                    "site_name": site.sitename,
+                    "state": site.state,
+                    "total_turbines": site.totalturbines
+                },
+                "turbines": turbine_list
+            }
+        }
+    
+    else:
+        # Get all sites with their turbines
+        sites = db.query(SiteMaster).all()
+        result = []
+        
+        for site in sites:
+            turbines = db.query(WTGMaster).filter(WTGMaster.site_id == site.id).all()
+            
+            turbine_list = []
+            for wtg in turbines:
+                turbine_list.append({
+                    "id": wtg.id,
+                    "wtg_id": wtg.wtg_id,
+                    "wtg_name": wtg.wtg_name,
+                    "ip_address": wtg.ip_address,
+                    "capacity": wtg.capacity,
+                    "feeder": wtg.feeder,
+                    "latitude": wtg.latitude,
+                    "longitude": wtg.longitude,
+                    "status": wtg.status
+                })
+            
+            result.append({
+                "site_id": site.id,
+                "site_name": site.sitename,
+                "state": site.state,
+                "total_turbines": site.totalturbines,
+                "turbines": turbine_list
+            })
+        
+        return {
+            "success": True,
+            "count": len(result),
+            "data": result
+        }
+
+# ==================== WTG ENTRY ROUTES ====================
 
 @wtg_router.post("/entry")
 async def create_wtg_entry(
@@ -1185,9 +1094,7 @@ async def create_wtg_entry(
         }
     }
 
-# ============================================================
-# FEEDER ENTRY ROUTES
-# ============================================================
+# ==================== FEEDER ENTRY ROUTES ====================
 
 @feeder_router.post("/entry")
 async def create_feeder_entry(
@@ -1280,9 +1187,7 @@ async def create_feeder_entry(
         }
     }
 
-# ============================================================
-# DOWNTIME ROUTES
-# ============================================================
+# ==================== DOWNTIME ROUTES ====================
 
 @downtime_router.get("/list")
 def get_downtimelist(
@@ -1408,21 +1313,308 @@ def get_downtimelist(
         "data": all_entries
     }
 
+@downtime_router.get("/view")
+def get_view_downtime(
+    status: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    all_entries = []
+    choose_cat = db.query(ChooseCategory).first()
+    choose_category_value = choose_cat.choosecategory if choose_cat else None
+    
+    wtg_query = db.query(WTGEntry).filter(WTGEntry.is_deleted == 0)
+    if status:
+        if status == "acknowledged":
+            wtg_query = wtg_query.filter(WTGEntry.ack_by.isnot(None))
+        elif status == "categorized":
+            wtg_query = wtg_query.filter(WTGEntry.categorized_by.isnot(None))
+    
+    wtg_results = wtg_query.all()
+    
+    feeder_query = db.query(FeederEntry).filter(FeederEntry.is_deleted == 0)
+    if status:
+        if status == "acknowledged":
+            feeder_query = feeder_query.filter(FeederEntry.ack_by.isnot(None))
+        elif status == "categorized":
+            feeder_query = feeder_query.filter(FeederEntry.categorized_by.isnot(None))
+    
+    feeder_results = feeder_query.all()
+    
+    for row in wtg_results:
+        status_value = "pending"
+        if row.categorized_by:
+            status_value = "categorized"
+        elif row.ack_by:
+            status_value = "acknowledged"
+        
+        duration = None
+        if row.end_time and row.start_time:
+            diff = row.end_time - row.start_time
+            total_seconds = diff.total_seconds()
+            hours = int(total_seconds // 3600)
+            minutes = int((total_seconds % 3600) // 60)
+            duration = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+        
+        all_entries.append({
+            "id": row.id,
+            "name": row.wtg_name,
+            "alarmcode": row.alarm_code,
+            "alarmdescription": row.alarm_description,
+            "type": row.wtg_type,
+            "status": status_value,
+            "start_time": row.start_time,
+            "end_time": row.end_time,
+            "duration": duration,
+            "ack_by": row.ack_by,
+            "ack_time": row.ack_time,
+            "ack_by_userid": row.ack_by_userid,
+            "categorized_by": row.categorized_by,
+            "categorized_time": row.categorized_time,
+            "initial_observation": row.initial_observation,
+            "source": "WTG",
+            "choose_category": choose_category_value
+        })
+    
+    for row in feeder_results:
+        status_value = "pending"
+        if row.categorized_by:
+            status_value = "categorized"
+        elif row.ack_by:
+            status_value = "acknowledged"
+        
+        duration = None
+        if row.endtime and row.starttime:
+            diff = row.endtime - row.starttime
+            total_seconds = diff.total_seconds()
+            hours = int(total_seconds // 3600)
+            minutes = int((total_seconds % 3600) // 60)
+            duration = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+        
+        all_entries.append({
+            "id": row.id,
+            "name": row.feedername,
+            "alarmcode": str(row.errorcode) if row.errorcode else None,
+            "alarmdescription": row.description,
+            "type": row.type,
+            "status": status_value,
+            "start_time": row.starttime,
+            "end_time": row.endtime,
+            "duration": duration,
+            "ack_by": row.ack_by,
+            "ack_time": row.ack_time,
+            "ack_by_userid": row.ack_by_userid,
+            "categorized_by": row.categorized_by,
+            "categorized_time": row.categorized_time,
+            "initial_observation": row.initial_observation,
+            "source": "Feeder",
+            "choose_category": choose_category_value
+        })
+    
+    all_entries.sort(key=lambda x: x["start_time"], reverse=True)
+    
+    return {
+        "success": True,
+        "count": len(all_entries),
+        "data": all_entries
+    }
 
-# ==================== POST RESPONSE DURATION ENDPOINT ====================
+@downtime_router.post("/edit")
+async def post_edit_downtime(
+    entry: DowntimeEditRequest,
+    db: Session = Depends(get_db)
+):
+    if entry.source == "WTG":
+        db_entry = db.query(WTGEntry).filter(
+            WTGEntry.id == entry.id,
+            WTGEntry.is_deleted == 0
+        ).first()
+        
+        if not db_entry:
+            raise HTTPException(
+                status_code=404,
+                detail=f"WTG entry with id {entry.id} not found"
+            )
+        
+        db_entry.wtg_name = entry.name
+        db_entry.wtg_type = entry.type
+        db_entry.alarm_code = entry.alarmcode
+        db_entry.alarm_description = entry.alarmdescription
+        db_entry.start_time = entry.start_time
+        db_entry.end_time = entry.end_time
+        db_entry.ack_by = entry.ack_by
+        db_entry.categorized_by = entry.categorized_by
+        db_entry.initial_observation = entry.initial_observation
+        
+        if entry.ack_by:
+            db_entry.ack_time = datetime.now()
+            user = db.query(UserMaster).filter(UserMaster.username == entry.ack_by).first()
+            if user:
+                db_entry.ack_by_userid = user.id
+        
+        if entry.categorized_by:
+            db_entry.categorized_time = datetime.now()
+        
+        db.commit()
+        db.refresh(db_entry)
+        
+        return {
+            "success": True,
+            "message": "WTG entry updated successfully",
+            "data": {
+                "id": db_entry.id,
+                "name": db_entry.wtg_name,
+                "alarmcode": db_entry.alarm_code,
+                "alarmdescription": db_entry.alarm_description,
+                "type": db_entry.wtg_type,
+                "start_time": db_entry.start_time,
+                "end_time": db_entry.end_time,
+                "ack_by": db_entry.ack_by,
+                "ack_time": db_entry.ack_time,
+                "categorized_by": db_entry.categorized_by,
+                "categorized_time": db_entry.categorized_time,
+                "initial_observation": db_entry.initial_observation,
+                "source": "WTG"
+            }
+        }
+    
+    elif entry.source == "Feeder":
+        db_entry = db.query(FeederEntry).filter(
+            FeederEntry.id == entry.id,
+            FeederEntry.is_deleted == 0
+        ).first()
+        
+        if not db_entry:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Feeder entry with id {entry.id} not found"
+            )
+        
+        db_entry.feedername = entry.name
+        db_entry.type = entry.type
+        db_entry.errorcode = int(entry.alarmcode) if entry.alarmcode and entry.alarmcode.isdigit() else None
+        db_entry.description = entry.alarmdescription
+        db_entry.starttime = entry.start_time
+        db_entry.endtime = entry.end_time
+        db_entry.ack_by = entry.ack_by
+        db_entry.categorized_by = entry.categorized_by
+        db_entry.initial_observation = entry.initial_observation
+        
+        if entry.ack_by:
+            db_entry.ack_time = datetime.now()
+            user = db.query(UserMaster).filter(UserMaster.username == entry.ack_by).first()
+            if user:
+                db_entry.ack_by_userid = user.id
+        
+        if entry.categorized_by:
+            db_entry.categorized_time = datetime.now()
+        
+        db.commit()
+        db.refresh(db_entry)
+        
+        return {
+            "success": True,
+            "message": "Feeder entry updated successfully",
+            "data": {
+                "id": db_entry.id,
+                "name": db_entry.feedername,
+                "alarmcode": str(db_entry.errorcode) if db_entry.errorcode else None,
+                "alarmdescription": db_entry.description,
+                "type": db_entry.type,
+                "start_time": db_entry.starttime,
+                "end_time": db_entry.endtime,
+                "ack_by": db_entry.ack_by,
+                "ack_time": db_entry.ack_time,
+                "categorized_by": db_entry.categorized_by,
+                "categorized_time": db_entry.categorized_time,
+                "initial_observation": db_entry.initial_observation,
+                "source": "Feeder"
+            }
+        }
+    
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Source must be 'WTG' or 'Feeder'"
+        )
 
-@app.post("/post_responseduration")
+@downtime_router.delete("/delete")
+def delete_downtime(
+    entry: DowntimeDeleteRequest,
+    db: Session = Depends(get_db)
+):
+    if entry.source == "WTG":
+        db_entry = db.query(WTGEntry).filter(
+            WTGEntry.id == entry.id,
+            WTGEntry.is_deleted == 0
+        ).first()
+        
+        if not db_entry:
+            raise HTTPException(
+                status_code=404,
+                detail=f"WTG entry with id {entry.id} not found"
+            )
+        
+        db_entry.is_deleted = 1
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": f"WTG entry '{db_entry.wtg_name}' deleted successfully",
+            "data": {
+                "id": db_entry.id,
+                "name": db_entry.wtg_name,
+                "source": "WTG",
+                "deleted": True
+            }
+        }
+    
+    elif entry.source == "Feeder":
+        db_entry = db.query(FeederEntry).filter(
+            FeederEntry.id == entry.id,
+            FeederEntry.is_deleted == 0
+        ).first()
+        
+        if not db_entry:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Feeder entry with id {entry.id} not found"
+            )
+        
+        db_entry.is_deleted = 1
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": f"Feeder entry '{db_entry.feedername}' deleted successfully",
+            "data": {
+                "id": db_entry.id,
+                "name": db_entry.feedername,
+                "source": "Feeder",
+                "deleted": True
+            }
+        }
+    
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Source must be 'WTG' or 'Feeder'"
+        )
+
+# ==================== RESPONSE ROUTES ====================
+
+@response_router.post("/duration")
 async def create_response_duration(
     entry: ResponseDurationCreate,
     db: Session = Depends(get_db)
 ):
-   
+    response_map = get_response_map(db)
+    response_reverse_map = get_response_reverse_map(db)
+    
     responsecode = entry.responsecode
     responsedescription = entry.responsedescription
     
     if responsecode and responsedescription:
-        
-        expected_description = RESPONSE_MAP.get(responsecode)
+        expected_description = response_map.get(responsecode)
         if not expected_description:
             raise HTTPException(
                 status_code=400,
@@ -1435,8 +1627,7 @@ async def create_response_duration(
             )
     
     elif responsecode and not responsedescription:
- 
-        description = RESPONSE_MAP.get(responsecode)
+        description = response_map.get(responsecode)
         if not description:
             raise HTTPException(
                 status_code=400,
@@ -1445,8 +1636,7 @@ async def create_response_duration(
         responsedescription = description
     
     elif responsedescription and not responsecode:
-        
-        code = RESPONSE_REVERSE_MAP.get(responsedescription)
+        code = response_reverse_map.get(responsedescription)
         if not code:
             raise HTTPException(
                 status_code=400,
@@ -1454,7 +1644,6 @@ async def create_response_duration(
             )
         responsecode = code
     
-  
     duration = entry.duration
     if entry.endtime and not duration:
         diff = entry.endtime - entry.starttime
@@ -1471,7 +1660,7 @@ async def create_response_duration(
             status_code=400,
             detail="End time must be after start time"
         )
-   
+    
     new_entry = ResponseDuration(
         responsecode=responsecode,
         responsedescription=responsedescription,
@@ -1496,17 +1685,13 @@ async def create_response_duration(
             "duration": new_entry.duration
         }
     }
-# ==================== GET RESPONSE DURATION ENDPOINT ====================
 
-@app.get("/get_responsedurations")
+@response_router.get("/durations")
 def get_response_durations(
     responsecode: Optional[str] = None,
     responsedescription: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    """
-    Get all response duration entries with optional filters.
-    """
     query = db.query(ResponseDuration)
     
     if responsecode:
@@ -1532,9 +1717,7 @@ def get_response_durations(
         ]
     }
 
-# ============================================================
 # REGISTER ROUTERS
-# ============================================================
 
 app.include_router(auth_router)
 app.include_router(user_router)
@@ -1543,10 +1726,10 @@ app.include_router(master_router)
 app.include_router(wtg_router)
 app.include_router(feeder_router)
 app.include_router(downtime_router)
+app.include_router(response_router)
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(
         app,
         host="0.0.0.0",
